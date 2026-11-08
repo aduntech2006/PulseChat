@@ -1,0 +1,2532 @@
+//  frontend/src/components/chat/dashbord.jsx
+import { useEffect, useState, useRef } from "react";
+import { useNavigate, Navigate } from "react-router-dom";
+import axios from "axios";
+import io from 'socket.io-client';
+import {
+  MdOutlineModeNight,
+  MdOutlineWbSunny,
+  MdOutlineDelete,
+  MdClose,
+  MdMenu,
+  MdArrowBackIos,
+  MdSend
+} from 'react-icons/md';
+
+const URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
+// Simple sound utility
+const playSound = (type) => {
+  console.log(`Playing ${type} sound`);
+};
+
+const Dashboard = () => {
+  const [messages, setMessages] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [msgInput, setMsgInput] = useState("");
+  const [selectedChat, setSelectedChat] = useState({ type: "general", data: null });
+  const [loading, setLoading] = useState(false);
+  const [socket, setSocket] = useState(null);
+  const [onlineUsers, setOnlineUsers] = useState(new Set());
+  const [connectionStatus, setConnectionStatus] = useState('connecting');
+
+  const user = JSON.parse(localStorage.getItem("user") || "null");
+  const navigate = useNavigate();
+  const messagesEndRef = useRef();
+
+  // Protect route
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  // Socket connection
+  useEffect(() => {
+    console.log('Connecting to:', URL);
+    const socketInstance = io(URL, {
+      transports: ['websocket', 'polling']
+    });
+
+    socketInstance.on('connect', () => {
+      console.log('Socket connected');
+      setConnectionStatus('connected');
+      socketInstance.emit('user-online', user.id);
+    });
+
+    socketInstance.on('disconnect', () => {
+      console.log('Socket disconnected');
+      setConnectionStatus('disconnected');
+    });
+
+    socketInstance.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+      setConnectionStatus('error');
+    });
+
+    socketInstance.on('new-message', (message) => {
+      console.log('New message received:', message);
+      setMessages(prev => {
+        // Avoid duplicates
+        if (prev.some(m => m.id === message.id)) return prev;
+        return [...prev, message];
+      });
+      
+      if (message.sender_id !== user.id) {
+        playSound('receive');
+      }
+    });
+
+    socketInstance.on('message-delivered', ({ tempId, messageId }) => {
+      console.log('Message delivered:', { tempId, messageId });
+      setMessages(prev => 
+        prev.map(msg => 
+          msg.id === tempId ? { ...msg, id: messageId, status: 'delivered' } : msg
+        )
+      );
+    });
+
+    socketInstance.on('message-deleted', ({ messageId }) => {
+      console.log('Message deleted:', messageId);
+      setMessages(prev => prev.filter(msg => msg.id !== messageId && msg.id !== `temp-${messageId}`));
+    });
+
+    socketInstance.on('user-status-change', ({ userId, status }) => {
+      console.log('User status change:', { userId, status });
+      setOnlineUsers(prev => {
+        const newSet = new Set(prev);
+        if (status === 'online') {
+          newSet.add(userId);
+        } else {
+          newSet.delete(userId);
+        }
+        return newSet;
+      });
+    });
+
+    setSocket(socketInstance);
+
+    return () => {
+      console.log('Disconnecting socket');
+      socketInstance.disconnect();
+    };
+  }, [user.id]);
+
+  // Fetch initial data
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  useEffect(() => {
+    fetchMessages();
+  }, [selectedChat]);
+
+  // Auto-scroll
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  const fetchUsers = async () => {
+    try {
+      console.log('Fetching users from:', `${URL}/api/messages/users`);
+      const res = await axios.get(`${URL}/api/messages/users`);
+      console.log('Users fetched:', res.data);
+      setUsers(res.data.filter(u => u.id !== user.id));
+    } catch (err) {
+      console.error('Fetch users error:', err);
+    }
+  };
+
+  const fetchMessages = async () => {
+    try {
+      setLoading(true);
+      let endpoint = `${URL}/api/messages/general`;
+      
+      if (selectedChat.type === "private" && selectedChat.data) {
+        endpoint = `${URL}/api/messages/private/${selectedChat.data.id}?currentUserId=${user.id}`;
+      }
+      
+      console.log('Fetching messages from:', endpoint);
+      const res = await axios.get(endpoint);
+      console.log('Messages fetched:', res.data);
+      setMessages(res.data || []);
+    } catch (err) {
+      console.error('Fetch messages error:', err);
+      setMessages([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!msgInput.trim()) return;
+
+    const tempId = `temp-${Date.now()}`;
+    const tempMessage = {
+      id: tempId,
+      message: msgInput,
+      sender_id: user.id,
+      sender_name: user.username,
+      created_at: new Date().toISOString(),
+      message_type: 'text',
+      status: 'sending'
+    };
+
+    console.log('Sending message:', tempMessage);
+    
+    // Optimistic update
+    setMessages(prev => [...prev, tempMessage]);
+    playSound('send');
+
+    // Send via socket
+    if (socket && socket.connected) {
+      socket.emit('send-message', {
+        tempId,
+        sender_id: user.id,
+        message: msgInput,
+        chatType: selectedChat.type,
+        recipient_id: selectedChat.data?.id,
+        message_type: 'text'
+      });
+    } else {
+      console.warn('Socket not connected, message not sent');
+    }
+
+    setMsgInput("");
+  };
+
+  const handleDelete = (messageId) => {
+    console.log('Deleting message:', messageId);
+    if (socket && socket.connected) {
+      socket.emit('delete-message', { messageId });
+    } else {
+      // Fallback: remove locally if socket not connected
+      setMessages(prev => prev.filter(m => m.id !== messageId));
+    }
+  };
+
+  const toggleTheme = () => {
+    document.body.classList.toggle('dark');
+    localStorage.setItem('theme', document.body.classList.contains('dark') ? 'dark' : 'light');
+  };
+
+  const toggleSidebar = () => {
+    document.body.classList.toggle('show-sidebar');
+  };
+
+  const handleLogout = () => {
+    if (socket) socket.disconnect();
+    localStorage.removeItem("user");
+    localStorage.removeItem("token");
+    navigate("/login");
+  };
+
+  const getInitials = (name) => {
+    return name ? name.split(" ").map(n => n[0]).join("").toUpperCase() : "??";
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage(e);
+    }
+  };
+
+  console.log('Rendering Dashboard:', { 
+    user, 
+    selectedChat, 
+    messagesCount: messages.length, 
+    usersCount: users.length,
+    connectionStatus 
+  });
+
+  return (
+    <div className="app">
+      {/* Connection Status */}
+      {connectionStatus !== 'connected' && (
+        <div className={`connection-status ${connectionStatus}`}>
+          {connectionStatus === 'connecting' && 'Connecting...'}
+          {connectionStatus === 'disconnected' && 'Disconnected - Trying to reconnect...'}
+          {connectionStatus === 'error' && 'Connection Error - Check server'}
+        </div>
+      )}
+
+      {/* Loading */}
+      {loading && (
+        <div className="loading-overlay">
+          <div className="loading-spinner"></div>
+          <div className="loading-text">Loading messages...</div>
+        </div>
+      )}
+
+      {/* Top Bar */}
+      <div className="topbar">
+        <div className="brand">
+          <button className="menu-btn" onClick={toggleSidebar}>
+            <MdMenu />
+          </button>
+          <div className="logo">Chat App</div>
+          <span className="username">{user.username}</span>
+        </div>
+        <div className="actions">
+          <button className="icon-btn" onClick={toggleTheme} title="Toggle theme">
+            <MdOutlineModeNight className="dark-icon" />
+            <MdOutlineWbSunny className="light-icon" />
+          </button>
+          <button className="icon-btn logout-btn" onClick={handleLogout} title="Logout">
+            Logout
+          </button>
+        </div>
+      </div>
+
+      <div className="main">
+        {/* Sidebar */}
+        <aside className="sidebar">
+          <div className="chats">
+            {/* General Chat */}
+            <div 
+              className={`chat-item ${selectedChat.type === 'general' ? 'active' : ''}`}
+              onClick={() => {
+                setSelectedChat({ type: "general", data: null });
+                if (window.innerWidth <= 768) toggleSidebar();
+              }}
+            >
+              <div className="avatar">GC</div>
+              <div className="chat-info">
+                <div className="name">General Chat</div>
+                <div className="preview">Public messages</div>
+              </div>
+            </div>
+
+            {/* Private Chats */}
+            {users.length > 0 ? (
+              users.map(u => (
+                <div 
+                  key={u.id} 
+                  className={`chat-item ${selectedChat.type === 'private' && selectedChat.data?.id === u.id ? 'active' : ''}`}
+                  onClick={() => {
+                    setSelectedChat({ type: "private", data: u });
+                    if (window.innerWidth <= 768) toggleSidebar();
+                  }}
+                >
+                  <div className="avatar">{getInitials(u.username)}</div>
+                  <div className="chat-info">
+                    <div className="name">
+                      {u.username}
+                      {onlineUsers.has(u.id) && <span className="online-dot"></span>}
+                    </div>
+                    <div className="preview">
+                      {onlineUsers.has(u.id) ? 'Online' : 'Tap to chat'}
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="chat-item">
+                <div className="chat-info">
+                  <div className="name">No other users yet</div>
+                  <div className="preview">Invite someone to join!</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* Chat Area */}
+        <section className="chat">
+          {/* Chat Header */}
+          <div className="chat-header">
+            <button className="go-back-btn" onClick={toggleSidebar}>
+              <MdArrowBackIos />
+            </button>
+            <div className="avatar">
+              {selectedChat.type === 'general' ? 'GC' : getInitials(selectedChat.data?.username)}
+            </div>
+            <div className="chat-title">
+              <div className="name">
+                {selectedChat.type === 'general' 
+                  ? 'General Chat' 
+                  : selectedChat.data?.username || 'Private Chat'}
+                {selectedChat.type === 'private' && selectedChat.data && onlineUsers.has(selectedChat.data.id) && (
+                  <span className="online-dot"></span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div className="messages">
+            {messages.length === 0 ? (
+              <div className="empty-state">
+                <p>No messages yet. Start the conversation!</p>
+              </div>
+            ) : (
+              messages.map(m => {
+                const isOwn = m.sender_id === user.id;
+                
+                return (
+                  <div key={m.id} className={`message-bubble ${isOwn ? 'own' : ''}`}>
+                    <div className="message-content">
+                      <div className="message-header">
+                        <span className="sender-name">
+                          {isOwn ? 'You:' : `${m.sender_name}:`}
+                        </span>
+                        <span className="message-text">{m.message}</span>
+                      </div>
+                      
+                      <div className="message-footer">
+                        <span className="message-time">
+                          {new Date(m.created_at).toLocaleTimeString('en-US', {
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </span>
+                        
+                        {isOwn && (
+                          <span className="message-status">
+                            {m.status === 'sending' && '↺'}
+                            {m.status === 'delivered' && '✓✓'}
+                            {!m.status && '✓✓'}
+                          </span>
+                        )}
+                        
+                        {(isOwn || selectedChat.type === 'general') && (
+                          <button 
+                            className="message-menu-btn" 
+                            onClick={() => handleDelete(m.id)}
+                            title="Delete message"
+                          >
+                            <MdOutlineDelete />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Composer */}
+          <form className="composer" onSubmit={handleSendMessage}>
+            <div className="composer-main">
+              <textarea
+                className="message-input"
+                value={msgInput}
+                onChange={(e) => setMsgInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Type a message..."
+                rows={1}
+              />
+            </div>
+            <button 
+              type="submit" 
+              className="send-btn" 
+              disabled={!msgInput.trim()}
+              title="Send message"
+            >
+              <MdSend />
+            </button>
+          </form>
+        </section>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;
+
+
+
+// frontend/src/components/chat/FileUpload.jsx
+import { useRef } from 'react';
+import { MdAttachFile, MdImage } from 'react-icons/md';
+import axios from 'axios';
+
+const FileUpload = ({ selectedChat, user, onMessageSent }) => {
+  const fileInputRef = useRef();
+  const imageInputRef = useRef();
+
+  const handleFileSelect = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleImageSelect = () => {
+    imageInputRef.current?.click();
+  };
+
+  const uploadFile = async (file, type) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('sender_id', user.id);
+      formData.append('chatType', selectedChat.type);
+      formData.append('message_type', type);
+      
+      if (selectedChat.type === 'private') {
+        formData.append('recipient_id', selectedChat.data.id);
+      }
+
+      const response = await axios.post(`${import.meta.env.VITE_API_URL}/api/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      if (response.data.success) {
+        onMessageSent(response.data.message);
+      }
+    } catch (err) {
+      alert('Upload failed: ' + (err.response?.data?.error || err.message));
+    }
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      await uploadFile(file, 'file');
+      e.target.value = '';
+    }
+  };
+
+  const handleImageChange = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      await uploadFile(file, 'image');
+      e.target.value = '';
+    }
+  };
+
+  return (
+    <>
+      <button type="button" className="upload-btn" onClick={handleFileSelect}>
+        <MdAttachFile />
+      </button>
+      <button type="button" className="upload-btn" onClick={handleImageSelect}>
+        <MdImage />
+      </button>
+      
+      <input
+        ref={fileInputRef}
+        type="file"
+        style={{ display: 'none' }}
+        onChange={handleFileChange}
+        accept="*/*"
+      />
+      <input
+        ref={imageInputRef}
+        type="file"
+        style={{ display: 'none' }}
+        onChange={handleImageChange}
+        accept="image/*"
+      />
+    </>
+  );
+};
+
+export default FileUpload;
+
+
+
+// frontend/src/components/chat/MessageBubble.jsx
+import { useState } from 'react';
+import { MdMoreVert, MdOutlineReply, MdOutlineEdit, MdOutlineDelete, MdSend, MdClose, MdMic, MdAttachFile } from 'react-icons/md';
+
+const MessageBubble = ({ 
+  message, 
+  isOwn, 
+  currentUser, 
+  replyMessage, 
+  isEditing, 
+  editText, 
+  onEdit, 
+  onDelete, 
+  onReply, 
+  onEditStart, 
+  onEditCancel, 
+  onEditTextChange,
+  replyInput,
+  onReplyInputChange,
+  onSendReply,
+  showReplyBox,
+  onCancelReply
+}) => {
+  const [showMenu, setShowMenu] = useState(false);
+
+  const handleMenuClick = (e) => {
+    e.stopPropagation();
+    setShowMenu(!showMenu);
+  };
+
+  const closeMenu = () => setShowMenu(false);
+
+  return (
+    <div className={`message-bubble ${isOwn ? 'own' : ''}`}>
+      {isEditing ? (
+        <div className="edit-container">
+          <input
+            type="text"
+            value={editText}
+            onChange={(e) => onEditTextChange(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && onEdit(message.id, editText)}
+            className="edit-input"
+          />
+          <div className="edit-actions">
+            <button onClick={() => onEdit(message.id, editText)} className="btn-send">
+              <MdSend />
+            </button>
+            <button onClick={onEditCancel} className="btn-cancel">
+              <MdClose />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          {replyMessage && (
+            <div className="reply-preview">
+              <span className="reply-author">
+                {replyMessage.sender_id === currentUser.id ? 'You' : replyMessage.sender_name}
+              </span>
+              <span className="reply-text">{replyMessage.message}</span>
+            </div>
+          )}
+
+          <div className="message-content">
+            <div className="message-header">
+              <span className="sender-name">
+                {isOwn ? 'You:' : `${message.sender_name}:`}
+              </span>
+              
+              {message.message_type === 'voice' ? (
+                <div className="voice-player">
+                  <button className="play-btn">
+                    <MdMic />
+                  </button>
+                  <div className="voice-info">
+                    <div className="voice-waveform"></div>
+                    <span className="voice-time">{message.voice_duration}s</span>
+                  </div>
+                </div>
+              ) : message.message_type === 'image' ? (
+                <div className="media-content">
+                  <img 
+                    src={`${import.meta.env.VITE_API_URL}${message.media_url}`}
+                    alt={message.message}
+                    className="message-image"
+                  />
+                </div>
+              ) : message.message_type === 'file' ? (
+                <div className="file-content">
+                  <MdAttachFile className="file-icon" />
+                  <span className="file-name">{message.message}</span>
+                  <a 
+                    href={`${import.meta.env.VITE_API_URL}${message.media_url}`}
+                    download
+                    className="download-btn"
+                  >
+                    ⬇
+                  </a>
+                </div>
+              ) : (
+                <span className="message-text">{message.message}</span>
+              )}
+            </div>
+
+            <div className="message-footer">
+              <span className="message-time">
+                {new Date(message.created_at).toLocaleTimeString('en-US', {
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}
+              </span>
+              {isOwn && (
+                <span className="message-status">
+                  {message.status === 'sending' && '↺'}
+                  {message.status === 'sent' && '✓'}
+                  {message.status === 'delivered' && '✓✓'}
+                  {!message.status && '✓✓'}
+                </span>
+              )}
+              <div className="message-menu-container">
+                <button className="message-menu-btn" onClick={handleMenuClick}>
+                  <MdMoreVert />
+                </button>
+                {showMenu && (
+                  <div className="message-menu" onClick={closeMenu}>
+                    <button onClick={() => { onReply(message); closeMenu(); }}>
+                      <MdOutlineReply /> Reply
+                    </button>
+                    {isOwn && (
+                      <button onClick={() => { onEditStart(message); closeMenu(); }}>
+                        <MdOutlineEdit /> Edit
+                      </button>
+                    )}
+                    <button onClick={() => { onDelete(message.id); closeMenu(); }}>
+                      <MdOutlineDelete /> Delete
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {showReplyBox && (
+            <form onSubmit={onSendReply} className="reply-box">
+              <input
+                type="text"
+                value={replyInput}
+                onChange={(e) => onReplyInputChange(e.target.value)}
+                placeholder={`Reply to ${message.sender_name}...`}
+                className="reply-input"
+              />
+              <div className="reply-actions">
+                <button type="submit" disabled={!replyInput.trim()}>
+                  <MdSend />
+                </button>
+                <button type="button" onClick={onCancelReply}>
+                  <MdClose />
+                </button>
+              </div>
+            </form>
+          )}
+        </>
+      )}
+    </div>
+  );
+};
+
+export default MessageBubble;
+
+
+// frontend/src/components/chat/VoiceRecorder.jsx
+import { useState, useRef } from 'react';
+import { MdMic, MdStop, MdSend, MdClose } from 'react-icons/md';
+
+const VoiceRecorder = ({ selectedChat, user, onVoiceNoteSent }) => {
+  const [isRecording, setIsRecording] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [mediaRecorder, setMediaRecorder] = useState(null);
+  const intervalRef = useRef(null);
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      
+      setMediaRecorder(recorder);
+      setIsRecording(true);
+      setDuration(0);
+
+      intervalRef.current = setInterval(() => {
+        setDuration(prev => prev + 1);
+      }, 1000);
+
+      recorder.start();
+    } catch (err) {
+      alert('Could not access microphone');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorder) {
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach(track => track.stop());
+      
+      clearInterval(intervalRef.current);
+      setIsRecording(false);
+      setMediaRecorder(null);
+      
+      // Send voice note (placeholder)
+      const voiceMessage = {
+        id: `temp-${Date.now()}`,
+        message: `Voice note (${duration}s)`,
+        sender_id: user.id,
+        sender_name: user.username,
+        created_at: new Date().toISOString(),
+        message_type: 'voice',
+        voice_duration: duration
+      };
+      
+      onVoiceNoteSent(voiceMessage);
+      setDuration(0);
+    }
+  };
+
+  const cancelRecording = () => {
+    if (mediaRecorder) {
+      mediaRecorder.stop();
+      mediaRecorder.stream.getTracks().forEach(track => track.stop());
+      
+      clearInterval(intervalRef.current);
+      setIsRecording(false);
+      setMediaRecorder(null);
+      setDuration(0);
+    }
+  };
+
+  return (
+    <div className="voice-recorder">
+      {!isRecording ? (
+        <button className="voice-btn" onClick={startRecording}>
+          <MdMic />
+        </button>
+      ) : (
+        <div className="recording-controls">
+          <div className="recording-indicator">
+            <div className="recording-dot"></div>
+            <span>{Math.floor(duration / 60)}:{String(duration % 60).padStart(2, '0')}</span>
+          </div>
+          <button className="stop-btn" onClick={stopRecording}>
+            <MdSend />
+          </button>
+          <button className="cancel-btn" onClick={cancelRecording}>
+            <MdClose />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default VoiceRecorder;
+
+
+
+// frontend/src/components/chat/ConnectionStatus.jsx
+const ConnectionStatus = ({ status }) => {
+  if (status === 'connected') return null;
+
+  return (
+    <div className={`connection-status ${status}`}>
+      {status === 'connecting' && 'Connecting...'}
+      {status === 'reconnecting' && 'Reconnecting...'}
+      {status === 'disconnected' && 'Disconnected'}
+    </div>
+  );
+};
+
+export default ConnectionStatus;
+
+
+
+.auth-header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.auth-header h1 {
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.auth-header p {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-weight: 500;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.form-group input {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 14px;
+  transition: var(--transition);
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.auth-button {
+  padding: 12px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.auth-button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.auth-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-footer {
+  text-align: center;
+  margin-top: 20px;
+}
+
+.auth-footer p {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.auth-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+.auth-link:hover {
+  text-decoration: underline;
+}
+
+.error-message {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+/* Upload buttons in composer */
+.upload-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  font-size: 18px;
+  transition: var(--transition);
+}
+
+.upload-btn:hover {
+  color: var(--accent);
+  background: var(--bg-primary);
+}
+
+.voice-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  font-size: 18px;
+  transition: var(--transition);
+}
+
+.voice-btn:hover {
+  color: var(--accent);
+  background: var(--bg-primary);
+}
+
+/* Voice recording controls */
+.recording-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--danger);
+  color: white;
+  border-radius: 20px;
+  padding: 6px 12px;
+  animation: recordingPulse 1s infinite;
+}
+
+@keyframes recordingPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+.recording-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.recording-dot {
+  width: 8px;
+  height: 8px;
+  background: white;
+  border-radius: 50%;
+  animation: pulse 1s infinite;
+}
+
+.stop-btn, .cancel-btn {
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  color: white;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 50%;
+  font-size: 12px;
+  transition: var(--transition);
+}
+
+.stop-btn:hover, .cancel-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Message menu */
+.message-menu-container {
+  position: relative;
+}
+
+.message-menu {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  min-width: 120px;
+  z-index: 100;
+}
+
+.message-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  transition: var(--transition);
+}
+
+.message-menu button:hover {
+  background: var(--bg-tertiary);
+}
+
+/* Reply box */
+.reply-box {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.reply-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.reply-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.reply-actions button {
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  transition: var(--transition);
+}
+
+.reply-actions button[type="submit"] {
+  background: var(--accent);
+  color: white;
+}
+
+.reply-actions button[type="button"] {
+  background: var(--danger);
+  color: white;
+}
+
+/* Edit container */
+.edit-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.edit-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.edit-actions button {
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.edit-actions .btn-send {
+  background: var(--success);
+  color: white;
+}
+
+.edit-actions .btn-cancel {
+  background: var(--danger);
+  color: white;
+}
+
+/* Empty state styling */
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+.empty-state p {
+  margin: 0;
+  padding: 20px;
+}
+
+/* Enhanced message bubble styling for better visibility */
+.message-bubble {
+  max-width: 70%;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  animation: messageSlideIn 0.3s ease-out;
+}
+
+.message-bubble.own {
+  align-self: flex-end;
+  margin-left: auto;
+}
+
+.message-content {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 12px 16px;
+  box-shadow: var(--shadow);
+  position: relative;
+  min-width: 120px;
+}
+
+.message-bubble.own .message-content {
+  background: linear-gradient(135deg, #25d366, #128c7e);
+  color: white;
+  border: none;
+}
+
+.message-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sender-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.message-bubble.own .sender-name {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.message-text {
+  font-size: 14px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  display: block;
+}
+
+.message-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.message-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.message-bubble.own .message-time {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.message-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.message-bubble.own .message-status {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.message-menu-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 14px;
+  opacity: 0.7;
+  transition: var(--transition);
+  margin-left: auto;
+}
+
+.message-menu-btn:hover {
+  opacity: 1;
+  background: var(--bg-tertiary);
+}
+
+.message-bubble.own .message-menu-btn {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.message-bubble.own .message-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+/* Better visual hierarchy for chat items */
+.chat-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: var(--transition);
+  border-bottom: 1px solid var(--border-light);
+  position: relative;
+}
+
+.chat-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.chat-item.active {
+  background: var(--accent-light);
+  border-right: 4px solid var(--accent);
+}
+
+.chat-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--accent);
+}
+
+/* Enhanced avatar styling */
+.avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  font-size: 16px;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+/* Better composer styling */
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 16px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.composer-main {
+  flex: 1;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 12px 16px;
+  transition: var(--transition);
+}
+
+.composer-main:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.message-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  min-height: 20px;
+  max-height: 100px;
+  line-height: 1.4;
+  width: 100%;
+}
+
+.message-input::placeholder {
+  color: var(--text-muted);
+}
+
+.send-btn {
+  width: 44px;
+  height: 44px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  font-size: 18px;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+.send-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+  transform: scale(1.05);
+}
+
+.send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Enhanced topbar */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  flex-shrink: 0;
+  z-index: 100;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 20px;
+  color: var(--accent);
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.username {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border-radius: 12px;
+}
+
+/* Better loading states */
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(4px);
+}
+
+.loading-spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid var(--border);
+  border-top: 4px solid var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.loading-text {
+  color: white;
+  margin-top: 16px;
+  font-weight: 500;
+  font-size: 16px;
+}
+
+/* Connection status improvements */
+.connection-status {
+  position: fixed;
+  top: 80px;
+  right: 20px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 1000;
+  box-shadow: var(--shadow-lg);
+  animation: slideInDown 0.3s ease-out;
+}
+
+.connection-status.connecting {
+  background: var(--warning);
+  color: white;
+}
+
+.connection-status.disconnected {
+  background: var(--danger);
+  color: white;
+}
+
+.connection-status.error {
+  background: var(--danger);
+  color: white;
+}
+
+@keyframes slideInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Dark theme icon visibility */
+.dark-icon, .light-icon {
+  font-size: 18px;
+  transition: var(--transition);
+}
+
+.dark-icon {
+  display: none;
+}
+
+body.dark .dark-icon {
+  display: block;
+}
+
+body.dark .light-icon {
+  display: none;
+}
+
+/* Authentication Pages */
+.auth-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  padding: 20px;
+}
+
+.auth-card {
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  padding: 32px;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: var(--shadow-lg);
+}
+
+.auth-header {
+  text-align:/* CSS Variables - Modern Color Scheme */}
+:root {
+  /* Light Theme - Clean & Fresh */
+  --bg-primary: #f8fafc;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f1f5f9;
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --text-muted: #94a3b8;
+  --border: #e2e8f0;
+  --border-light: #f1f5f9;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-light: #eff6ff;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.1);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --transition: all 0.2s ease;
+}
+
+body.dark {
+  /* Dark Theme - Modern & Sleek */
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-tertiary: #334155;
+  --text-primary: #f1f5f9;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --border: #334155;
+  --border-light: #475569;
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --accent-light: #1e3a8a;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #f87171;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+
+/* Reset & Base */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: var(--transition);
+  line-height: 1.5;
+}
+
+/* App Layout */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Top Bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  flex-shrink: 0;
+  z-index: 100;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.username {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icon-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: var(--transition);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.icon-btn:hover {
+  background: var(--border);
+}
+
+.logout-btn {
+  color: var(--danger);
+}
+
+.menu-btn {
+  display: none;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+/* Main Layout */
+.main {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  height: calc(100vh - 60px);
+  overflow: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chats {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.chat-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: var(--transition);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.chat-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.chat-item.active {
+  background: var(--accent-light);
+  border-right: 3px solid var(--accent);
+}
+
+.avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.chat-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.name {
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.online-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--success);
+  border-radius: 50%;
+  animation: pulse 2s infinite;
+}
+
+.unread-badge {
+  background: var(--danger);
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 10px;
+  min-width: 16px;
+  text-align: center;
+}
+
+/* Chat Area */
+.chat {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.go-back-btn {
+  display: none;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.chat-title {
+  flex: 1;
+}
+
+.chat-title .name {
+  font-weight: 700;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.typing-indicator {
+  font-size: 12px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-style: italic;
+}
+
+.typing-dots {
+  display: flex;
+  gap: 2px;
+}
+
+.typing-dots span {
+  width: 4px;
+  height: 4px;
+  background: var(--accent);
+  border-radius: 50%;
+  animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(1) { animation-delay: -0.32s; }
+.typing-dots span:nth-child(2) { animation-delay: -0.16s; }
+.typing-dots span:nth-child(3) { animation-delay: 0s; }
+
+/* Messages */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.date-separator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 16px 0;
+  position: relative;
+}
+
+.date-separator::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border);
+}
+
+.date-separator span {
+  background: var(--bg-primary);
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  border-radius: var(--radius);
+  position: relative;
+  border: 1px solid var(--border);
+}
+
+/* Message Bubbles - WhatsApp Style */
+.message-bubble {
+  max-width: 70%;
+  margin-bottom: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.message-bubble.own {
+  align-self: flex-end;
+  margin-left: auto;
+}
+
+.message-content {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  box-shadow: var(--shadow);
+  position: relative;
+}
+
+.message-bubble.own .message-content {
+  background: linear-gradient(135deg, #25d366, #128c7e);
+  color: white;
+  border: none;
+}
+
+.message-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.sender-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.message-bubble.own .sender-name {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.message-text {
+  font-size: 14px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.message-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.message-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.message-bubble.own .message-time {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.message-status {
+  font-size: 12px;
+  margin-left: 2px;
+}
+
+.message-menu-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  font-size: 14px;
+  opacity: 0;
+  transition: var(--transition);
+}
+
+.message-bubble:hover .message-menu-btn {
+  opacity: 1;
+}
+
+/* Reply Preview */
+.reply-preview {
+  background: var(--bg-tertiary);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.message-bubble.own .reply-preview {
+  background: rgba(255, 255, 255, 0.1);
+  border-left-color: rgba(255, 255, 255, 0.5);
+}
+
+.reply-author {
+  font-weight: 600;
+  color: var(--accent);
+  margin-right: 4px;
+}
+
+.message-bubble.own .reply-author {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.reply-text {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.message-bubble.own .reply-text {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* Media Messages */
+.media-content {
+  margin-top: 4px;
+}
+
+.message-image {
+  max-width: 250px;
+  max-height: 250px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+  display: block;
+}
+
+.message-image:hover {
+  transform: scale(1.02);
+}
+
+.voice-player {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  min-width: 180px;
+}
+
+.message-bubble.own .voice-player {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.play-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+}
+
+.play-btn:hover {
+  background: var(--accent-hover);
+}
+
+.voice-waveform {
+  flex: 1;
+  height: 20px;
+  background: linear-gradient(90deg, var(--accent) 0%, transparent 100%);
+  border-radius: 2px;
+  opacity: 0.3;
+}
+
+.voice-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.file-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+.message-bubble.own .file-content {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.file-icon {
+  color: var(--accent);
+  font-size: 18px;
+}
+
+.message-bubble.own .file-icon {
+  color: white;
+}
+
+.file-name {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.download-btn:hover {
+  background: var(--accent-hover);
+}
+
+/* Composer */
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.composer-main {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+.message-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  min-height: 20px;
+  max-height: 100px;
+  line-height: 1.4;
+}
+
+.message-input::placeholder {
+  color: var(--text-muted);
+}
+
+.send-btn {
+  width: 40px;
+  height: 40px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  font-size: 18px;
+}
+
+.send-btn:hover {
+  background: var(--accent-hover);
+  transform: scale(1.05);
+}
+
+.send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Modals */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: var(--shadow-lg);
+  animation: modalSlideIn 0.3s ease-out;
+}
+
+@keyframes modalSlideIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.modal-content h3 {
+  margin-bottom: 8px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.modal-content p {
+  margin-bottom: 20px;
+  color: var(--text-secondary);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.btn-cancel, .btn-delete, .btn-send {
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: none;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 14px;
+  transition: var(--transition);
+}
+
+.btn-cancel {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.btn-cancel:hover {
+  background: var(--border);
+}
+
+.btn-delete {
+  background: var(--danger);
+  color: white;
+}
+
+.btn-delete:hover {
+  background: #dc2626;
+}
+
+.btn-send {
+  background: var(--accent);
+  color: white;
+}
+
+.btn-send:hover {
+  background: var(--accent-hover);
+}
+
+/* Loading States */
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.loading-spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid var(--border);
+  border-top: 4px solid var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+.loading-text {
+  color: white;
+  margin-top: 12px;
+  font-weight: 500;
+}
+
+.loading-spinner-small {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top: 2px solid white;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+/* Connection Status */
+.connection-status {
+  position: fixed;
+  top: 70px;
+  right: 16px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 500;
+  z-index: 500;
+  transition: var(--transition);
+}
+
+.connection-status.connected {
+  background: var(--success);
+  color: white;
+}
+
+.connection-status.connecting {
+  background: var(--warning);
+  color: white;
+}
+
+.connection-status.disconnected {
+  background: var(--danger);
+  color: white;
+}
+
+/* Animations */
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+  70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+@keyframes typing {
+  0%, 80%, 100% { transform: scale(0.8); opacity: 0.5; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes messageSlideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  .main {
+    grid-template-columns: 1fr;
+    position: relative;
+  }
+  
+  .menu-btn {
+    display: block;
+  }
+  
+  .sidebar {
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    z-index: 200;
+    transition: left 0.3s ease;
+  }
+  
+  body.show-sidebar .sidebar {
+    left: 0;
+  }
+  
+  body.show-sidebar .chat {
+    display: none;
+  }
+  
+  .go-back-btn {
+    display: block;
+  }
+  
+  .message-bubble {
+    max-width: 85%;
+  }
+  
+  .composer {
+    padding: 8px 12px;
+  }
+  
+  .send-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+}
+
+/* Theme Toggle Icons */
+.dark-icon {
+  display: none;
+}
+
+body.dark .dark-icon {
+  display: block;
+}
+
+body.dark .light-icon {
+  display: none;
+}
+
+/* Scrollbar Styling */
+.chats::-webkit-scrollbar,
+.messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chats::-webkit-scrollbar-track,
+.messages::-webkit-scrollbar-track {
+  background: var(--bg-tertiary);
+}
+
+.chats::-webkit-scrollbar-thumb,
+.messages::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.chats::-webkit-scrollbar-thumb:hover,
+.messages::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+
+
+// server.js
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { createServer } from "http";
+import { Server } from "socket.io";
+import path from "path";
+import fs from "fs";
+
+// Routes & Socket handlers
+import authRoutes from "./routes/authRoutes.js";
+import messageRoutes from "./routes/messageRoutes.js";
+import uploadRoutes from "./routes/uploadRoutes.js";
+import { setupSocketHandlers } from "./socket/socketHandlers.js";
+
+dotenv.config();
+
+const app = express();
+const server = createServer(app);
+const PORT = process.env.PORT || 5000;
+
+// ---------- Uploads Directory ----------
+const uploadDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+
+// ---------- CORS Configuration ----------
+const allowedOrigins = [
+  "http://localhost:5174",
+  "http://localhost:5173",
+  "http://localhost:3000"
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    console.log("CORS origin:", origin);
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS policy: No access from ${origin}`), false);
+    }
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: true
+};
+
+// ---------- Middleware ----------
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // preflight handling
+app.use(express.json());
+app.use("/uploads", express.static("uploads"));
+
+// ---------- Socket.IO Setup ----------
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    credentials: true
+  }
+});
+
+// Initialize socket handlers
+setupSocketHandlers(io);
+
+// ---------- Health Check ----------
+app.get("/", (req, res) => {
+  res.json({
+    message: "Chat API is running",
+    timestamp: new Date().toISOString(),
+    status: "healthy",
+    environment: process.env.NODE_ENV || "development"
+  });
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV || "development"
+  });
+});
+
+// ---------- Routes ----------
+app.use("/auth", authRoutes);
+app.use("/api/messages", messageRoutes);
+app.use("/api/upload", uploadRoutes);
+
+// ---------- Error Handling ----------
+app.use((err, req, res, next) => {
+  console.error("Server Error:", err);
+  res.status(500).json({
+    error: "Internal server error",
+    message: process.env.NODE_ENV === "development" ? err.message : "Something went wrong"
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({ error: "Route not found" });
+});
+
+// ---------- Graceful Shutdown ----------
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully");
+  server.close(() => {
+    console.log("Process terminated");
+  });
+});
+
+// ---------- Start Server ----------
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`📁 Upload directory: ${uploadDir}`);
+  console.log(`🌐 CORS origins: ${allowedOrigins.join(", ")}`);
+  console.log(`🔗 Files served at: http://localhost:${PORT}/uploads`);
+  console.log(`🏠 API Base: http://localhost:${PORT}`);
+});
+
+
